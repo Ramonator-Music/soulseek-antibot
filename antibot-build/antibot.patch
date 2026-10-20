@@ -1,0 +1,547 @@
+diff --git a/README.md b/README.md
+index 95a4f1e..33d34ba 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,7 @@
++> **soulseek-antibot** — "This is a modified version of slskd.  It is not maintained by, endorsed by, or affiliated with the slskd project or its author(s)."
++>
++> Modification (Copyright (c) 2026 Ramonator): incoming upload requests pass through a gate with a per-file download cap and a simple human verification over private chat (`antibot` options section). The original project lives at https://github.com/slskd/slskd. All original license notices below are preserved.
++
+ # slskd
+ 
+ [![Build](https://img.shields.io/github/actions/workflow/status/slskd/slskd/ci.yml?branch=master&logo=github)](https://github.com/slskd/slskd/actions/workflows/ci.yml)
+diff --git a/src/slskd/Antibot/AntibotService.cs b/src/slskd/Antibot/AntibotService.cs
+new file mode 100644
+index 0000000..b7f767c
+--- /dev/null
++++ b/src/slskd/Antibot/AntibotService.cs
+@@ -0,0 +1,375 @@
++// <copyright file="AntibotService.cs" company="Ramonator">
++//   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
++//   │ Copyright (c) 2026 Ramonator.
++//   │
++//   │ This program is free software: you can redistribute it and/or modify
++//   │ it under the terms of the GNU Affero General Public License as published
++//   │ by the Free Software Foundation, version 3.
++//   │
++//   │ This program is distributed in the hope that it will be useful,
++//   │ but WITHOUT ANY WARRANTY; without even the implied warranty of
++//   │ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++//   │ GNU Affero General Public License for more details.
++//   │
++//   │ You should have received a copy of the GNU Affero General Public License
++//   │ along with this program.  If not, see https://www.gnu.org/licenses/.
++//   │
++//   │ This program is distributed with Additional Terms pursuant to Section 7
++//   │ of the AGPLv3.  See the LICENSE file in the root directory of this
++//   │ project for the complete terms and conditions.
++//   │
++//   ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ╌ ╌╌╌╌ ╌
++//   │ SPDX-FileCopyrightText: Ramonator
++//   │ SPDX-License-Identifier: AGPL-3.0-only
++//   ╰───────────────────────────────────────────╶──── ─ ─── ─  ── ──┈  ┈
++// </copyright>
++
++using Microsoft.Extensions.Options;
++
++namespace slskd.Antibot
++{
++    using System;
++    using System.Collections.Concurrent;
++    using System.Collections.Generic;
++    using System.ComponentModel.DataAnnotations;
++    using System.Globalization;
++    using System.IO;
++    using System.Linq;
++    using System.Security.Cryptography;
++    using System.Text;
++    using System.Text.Json;
++    using System.Threading.Tasks;
++    using Serilog;
++    using slskd.Transfers.Uploads;
++    using slskd.Validation;
++    using Soulseek;
++
++    /// <summary>
++    ///     Upload request gate for the modified version: a per-file download cap and a simple human
++    ///     verification over private chat.
++    /// </summary>
++    /// <remarks>
++    ///     <para>
++    ///         The challenge word is derived from the username with an HMAC keyed by a secret stored in the data
++    ///         directory, so it is stable across restarts and no pending-challenge state needs to be persisted.
++    ///     </para>
++    ///     <para>
++    ///         Verified usernames are persisted to <c>antibot_verified.json</c> in the data directory.
++    ///     </para>
++    /// </remarks>
++    public class AntibotService
++    {
++        private static readonly string[] Words =
++        [
++            "mango", "tigre", "piano", "cometa", "lluvia", "volcan", "girasol", "ballena", "canela", "tambor",
++            "faro", "brujula", "cactus", "delfin", "eclipse", "fresa", "glaciar", "hormiga", "iguana", "jaguar",
++            "koala", "limon", "medusa", "nogal", "oregano", "pantera", "quinoa", "rayo", "sandia", "tortuga",
++            "uva", "violin", "yuca", "zorro", "acordeon", "bambu", "cereza", "dragon", "estrella", "flauta",
++            "guitarra", "helado", "isla", "jirafa", "laguna", "maraca", "naranja", "oruga", "paloma", "queso",
++            "rana", "selva", "trompeta", "urraca", "vela", "abeja", "bosque", "cangrejo", "durazno", "esponja",
++            "farol", "gaviota", "hongo", "jazmin", "lechuza", "manzana", "nutria", "ostra", "pepino", "remolino",
++            "salmon", "tucan", "vaquero", "almendra", "buho", "colibri", "duende", "espiga", "foca", "granizo",
++            "hamaca", "incienso", "jengibre", "lobo", "molino", "nectar", "oliva", "pinguino", "roble", "sirena",
++            "trueno", "vainilla", "ardilla", "bufanda", "caracol", "domino", "enano", "fogata", "grillo", "hielo",
++            "jabali", "lagarto", "mariposa", "niebla", "oveja", "pirata", "rubi", "semilla", "tiburon", "velero",
++            "arcoiris", "banjo", "cascada", "desierto", "escoba", "fantasma", "gorila", "hechizo", "linterna", "marimba",
++        ];
++
++        public AntibotService(IOptionsMonitor<global::slskd.Options> optionsMonitor, ISoulseekClient soulseekClient, IUploadService uploadService)
++        {
++            OptionsMonitor = optionsMonitor;
++            Client = soulseekClient;
++            Uploads = uploadService;
++
++            VerifiedFile = Path.Combine(Program.DataDirectory, "antibot_verified.json");
++            Key = LoadOrCreateKey(Path.Combine(Program.DataDirectory, "antibot.key"));
++            Verified = LoadVerified(VerifiedFile);
++
++            Log.Information("Antibot gate loaded with {Count} verified user(s)", Verified.Count);
++        }
++
++        private ILogger Log { get; } = Serilog.Log.ForContext<AntibotService>();
++        private IOptionsMonitor<global::slskd.Options> OptionsMonitor { get; }
++        private ISoulseekClient Client { get; }
++        private IUploadService Uploads { get; }
++        private string VerifiedFile { get; }
++        private byte[] Key { get; }
++        private HashSet<string> Verified { get; }
++        private object VerifiedLock { get; } = new object();
++        private ConcurrentDictionary<string, DateTime> LastChallenge { get; } = new ConcurrentDictionary<string, DateTime>();
++
++        /// <summary>
++        ///     Decides whether an incoming upload request should be rejected.
++        /// </summary>
++        /// <param name="username">The requesting user.</param>
++        /// <param name="filename">The requested file, as sent by the remote client.</param>
++        /// <returns>The rejection reason to send to the remote client, or null to let the request through.</returns>
++        public string CheckEnqueue(string username, string filename)
++        {
++            var options = OptionsMonitor.CurrentValue.Antibot;
++
++            if (!options.Enabled || IsExempt(username, options))
++            {
++                return null;
++            }
++
++            if (options.MaxDownloadsPerFile.HasValue)
++            {
++                var succeeded = TransferStates.Completed | TransferStates.Succeeded;
++
++                // includes removed records: the upload history is cleared daily, but the rows stay in the database
++                var count = Uploads.List(t => t.Username == username && t.Filename == filename && t.State == succeeded, includeRemoved: true).Count;
++
++                if (count >= options.MaxDownloadsPerFile.Value)
++                {
++                    Log.Information("Rejected enqueue request for user {Username}: per-file limit ({Count}/{Max}) for {Filename}", username, count, options.MaxDownloadsPerFile.Value, filename);
++                    return $"Already downloaded this file {options.MaxDownloadsPerFile.Value} times";
++                }
++            }
++
++            if (options.Verification.Enabled && !IsVerified(username))
++            {
++                Log.Information("Rejected enqueue request for user {Username}: verification required", username);
++                SendChallenge(username, options.Verification);
++                return "Verification required: check private messages";
++            }
++
++            return null;
++        }
++
++        /// <summary>
++        ///     Checks an incoming private message for a correct verification answer.
++        /// </summary>
++        /// <param name="username">The sender.</param>
++        /// <param name="id">The message id, used to acknowledge the message to the server.</param>
++        /// <param name="message">The message text.</param>
++        /// <returns>True if the message was a correct answer and was consumed; false to handle it normally.</returns>
++        public bool TryHandlePrivateMessage(string username, int id, string message)
++        {
++            var options = OptionsMonitor.CurrentValue.Antibot;
++
++            if (!options.Enabled || !options.Verification.Enabled || IsExempt(username, options) || IsVerified(username))
++            {
++                return false;
++            }
++
++            var word = WordFor(username);
++
++            if (!Tokenize(message).Contains(word))
++            {
++                return false;
++            }
++
++            lock (VerifiedLock)
++            {
++                Verified.Add(username);
++                SaveVerified();
++            }
++
++            LastChallenge.TryRemove(username, out _);
++            Log.Information("Antibot: user {Username} verified", username);
++
++            _ = Task.Run(async () =>
++            {
++                try
++                {
++                    // consumed messages never reach the conversation service, which is what normally acknowledges them;
++                    // without this the server would replay the message on every login
++                    await Client.AcknowledgePrivateMessageAsync(id);
++                    await SendLinesAsync(username, Render(options.Verification.SuccessMessage, word, options.Verification.SourceUrl));
++                }
++                catch (Exception ex)
++                {
++                    Log.Warning("Antibot: failed to acknowledge or confirm verification for {Username}: {Message}", username, ex.Message);
++                }
++            });
++
++            return true;
++        }
++
++        private static bool IsExempt(string username, AntibotOptions options)
++            => options.Exempt.Contains(username, StringComparer.Ordinal);
++
++        private static IEnumerable<string> Tokenize(string text)
++        {
++            var normalized = (text ?? string.Empty).Normalize(NormalizationForm.FormD);
++            var builder = new StringBuilder(normalized.Length);
++
++            foreach (var c in normalized)
++            {
++                var category = CharUnicodeInfo.GetUnicodeCategory(c);
++
++                if (category == UnicodeCategory.NonSpacingMark)
++                {
++                    continue;
++                }
++
++                builder.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : ' ');
++            }
++
++            return builder.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries);
++        }
++
++        private static string Render(string template, string word, string sourceUrl)
++            => (template ?? string.Empty)
++                .Replace("{word}", word, StringComparison.Ordinal)
++                .Replace("{source}", string.IsNullOrWhiteSpace(sourceUrl) ? "-" : sourceUrl, StringComparison.Ordinal);
++
++        private static byte[] LoadOrCreateKey(string file)
++        {
++            if (System.IO.File.Exists(file))
++            {
++                return System.IO.File.ReadAllBytes(file);
++            }
++
++            var key = RandomNumberGenerator.GetBytes(32);
++            System.IO.File.WriteAllBytes(file, key);
++            return key;
++        }
++
++        private static HashSet<string> LoadVerified(string file)
++        {
++            if (!System.IO.File.Exists(file))
++            {
++                return new HashSet<string>(StringComparer.Ordinal);
++            }
++
++            var users = JsonSerializer.Deserialize<string[]>(System.IO.File.ReadAllText(file)) ?? [];
++            return new HashSet<string>(users, StringComparer.Ordinal);
++        }
++
++        private bool IsVerified(string username)
++        {
++            lock (VerifiedLock)
++            {
++                return Verified.Contains(username);
++            }
++        }
++
++        private void SaveVerified()
++        {
++            // caller holds VerifiedLock
++            var temp = VerifiedFile + ".tmp";
++            var json = JsonSerializer.Serialize(Verified.OrderBy(u => u, StringComparer.Ordinal).ToArray(), new JsonSerializerOptions { WriteIndented = true });
++            System.IO.File.WriteAllText(temp, json);
++            System.IO.File.Move(temp, VerifiedFile, overwrite: true);
++        }
++
++        private async Task SendLinesAsync(string username, string text)
++        {
++            // the server silently drops private messages that contain line breaks, so each line goes as its own message
++            foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
++            {
++                await Client.SendPrivateMessageAsync(username, line);
++            }
++        }
++
++        private string WordFor(string username)
++        {
++            var hash = HMACSHA256.HashData(Key, Encoding.UTF8.GetBytes(username));
++            var index = BitConverter.ToUInt32(hash, 0) % (uint)Words.Length;
++            return Words[index];
++        }
++
++        private void SendChallenge(string username, AntibotOptions.VerificationOptions options)
++        {
++            var now = DateTime.UtcNow;
++            var cooldown = TimeSpan.FromMinutes(options.CooldownMinutes);
++
++            if (LastChallenge.TryGetValue(username, out var last) && now - last < cooldown)
++            {
++                return;
++            }
++
++            LastChallenge[username] = now;
++
++            if (LastChallenge.Count > 10_000)
++            {
++                foreach (var stale in LastChallenge.Where(kvp => now - kvp.Value >= cooldown).Select(kvp => kvp.Key).ToList())
++                {
++                    LastChallenge.TryRemove(stale, out _);
++                }
++            }
++
++            var text = Render(options.ChallengeMessage, WordFor(username), options.SourceUrl);
++
++            _ = Task.Run(async () =>
++            {
++                try
++                {
++                    await SendLinesAsync(username, text);
++                    Log.Information("Antibot: sent verification challenge to {Username}", username);
++                }
++                catch (Exception ex)
++                {
++                    Log.Warning("Antibot: failed to send verification challenge to {Username}: {Message}", username, ex.Message);
++                }
++            });
++        }
++    }
++
++    /// <summary>
++    ///     Options for the upload request gate of the modified version.
++    /// </summary>
++    public class AntibotOptions
++    {
++        /// <summary>
++        ///     Gets a value indicating whether the gate is enabled.
++        /// </summary>
++        public bool Enabled { get; init; } = false;
++
++        /// <summary>
++        ///     Gets the maximum number of successful downloads of the same file by the same user. Null disables the cap.
++        /// </summary>
++        [Range(1, int.MaxValue)]
++        public int? MaxDownloadsPerFile { get; init; } = null;
++
++        /// <summary>
++        ///     Gets usernames that bypass both the cap and the verification.
++        /// </summary>
++        public string[] Exempt { get; init; } = [];
++
++        /// <summary>
++        ///     Gets human verification options.
++        /// </summary>
++        [Validate]
++        public VerificationOptions Verification { get; init; } = new VerificationOptions();
++
++        /// <summary>
++        ///     Human verification options.
++        /// </summary>
++        public class VerificationOptions
++        {
++            /// <summary>
++            ///     Gets a value indicating whether users must verify before downloading.
++            /// </summary>
++            public bool Enabled { get; init; } = false;
++
++            /// <summary>
++            ///     Gets the minimum number of minutes between challenge messages to the same user.
++            /// </summary>
++            [Range(1, 1440)]
++            public int CooldownMinutes { get; init; } = 10;
++
++            /// <summary>
++            ///     Gets the URL of the source code of this modified version (AGPLv3 section 13). Rendered as {source}.
++            /// </summary>
++            public string SourceUrl { get; init; } = null;
++
++            /// <summary>
++            ///     Gets the challenge message. {word} is replaced with the user's word and {source} with the source URL.
++            /// </summary>
++            public string ChallengeMessage { get; init; } =
++                "Hola 👋 Comparto solo con personas, no con bots. Para descargar, escribe aquí la palabra «{word}» (una sola vez).\n" +
++                "Hi 👋 I only share with humans, not bots. To download, type the word «{word}» here (just once).\n" +
++                "Código de este cliente modificado / Source of this modified client: {source}";
++
++            /// <summary>
++            ///     Gets the message sent after a correct answer.
++            /// </summary>
++            public string SuccessMessage { get; init; } =
++                "¡Listo, quedaste verificado! Vuelve a intentar la descarga.\n" +
++                "Done, you're verified! Please retry your download.";
++        }
++    }
++}
+diff --git a/src/slskd/Application.cs b/src/slskd/Application.cs
+index 5128997..c55a8eb 100644
+--- a/src/slskd/Application.cs
++++ b/src/slskd/Application.cs
+@@ -5,6 +5,8 @@
+ //     █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█
+ //   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
+ //   │ Copyright (c) JP Dillingham.
++//   │ Copyright (c) 2026 Ramonator.
++//   │ Modified: upload requests and private messages pass through the antibot gate (per-file download cap and human verification over private chat).
+ //   │
+ //   │ This program is free software: you can redistribute it and/or modify
+ //   │ it under the terms of the GNU Affero General Public License as published
+@@ -197,6 +199,8 @@ namespace slskd
+ 
+             Client = soulseekClient;
+ 
++            Antibot = new global::slskd.Antibot.AntibotService(OptionsMonitor, soulseekClient, Transfers.Uploads);
++
+             Client.DiagnosticGenerated += Client_DiagnosticGenerated;
+ 
+             Client.TransferStateChanged += Client_TransferStateChanged;
+@@ -239,6 +243,7 @@ namespace slskd
+         private static bool ShuttingDown { get; set; } = false;
+ 
+         private ISoulseekClient Client { get; set; }
++        private global::slskd.Antibot.AntibotService Antibot { get; }
+         private FileService Files { get; }
+         private IRoomService RoomService { get; set; }
+         private IBrowseTracker BrowseTracker { get; set; }
+@@ -705,6 +710,15 @@ namespace slskd
+                     throw new DownloadEnqueueException("File not shared.");
+                 }
+ 
++                // modified version: per-file download cap and human verification. checked before the group lookup so
++                // that privileged users are not exempt.
++                var antibotRejection = Antibot.CheckEnqueue(username, filename);
++
++                if (antibotRejection != null)
++                {
++                    throw new DownloadEnqueueException(antibotRejection);
++                }
++
+                 // get the user's group. this will be the name of the user's group, if they have been added to a
+                 // user defined group, or one of the built-ins; 'default', 'privileged', 'leecher', or 'blacklisted'
+                 var group = await Users.GetOrFetchGroupAsync(username);
+@@ -1127,6 +1141,13 @@ namespace slskd
+                 // todo: raise blacklisted message event?
+             }
+ 
++            // modified version: a correct verification answer is consumed (and acknowledged) by the antibot gate
++            // instead of being added to the conversation
++            if (Antibot.TryHandlePrivateMessage(args.Username, args.Id, args.Message))
++            {
++                return;
++            }
++
+             Messaging.Conversations.HandleMessageAsync(args.Username, PrivateMessage.FromEventArgs(args));
+ 
+             if (Options.Integrations.Pushbullet.Enabled && !args.Replayed)
+diff --git a/src/slskd/Core/Options.cs b/src/slskd/Core/Options.cs
+index 05eaed5..bd4bf3e 100644
+--- a/src/slskd/Core/Options.cs
++++ b/src/slskd/Core/Options.cs
+@@ -5,6 +5,8 @@
+ //     █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█
+ //   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
+ //   │ Copyright (c) JP Dillingham.
++//   │ Copyright (c) 2026 Ramonator.
++//   │ Modified: added the 'antibot' options section (per-file download cap and human verification).
+ //   │
+ //   │ This program is free software: you can redistribute it and/or modify
+ //   │ it under the terms of the GNU Affero General Public License as published
+@@ -263,6 +265,12 @@ namespace slskd
+         [Validate]
+         public TransfersOptions Transfers { get; init; } = new TransfersOptions();
+ 
++        /// <summary>
++        ///     Gets options for the upload request gate of this modified version (per-file download cap and human verification).
++        /// </summary>
++        [Validate]
++        public global::slskd.Antibot.AntibotOptions Antibot { get; init; } = new global::slskd.Antibot.AntibotOptions();
++
+         /// <summary>
+         ///     Gets blacklist options.
+         /// </summary>
+diff --git a/src/slskd/Program.cs b/src/slskd/Program.cs
+index cfe8bcb..8786cbd 100644
+--- a/src/slskd/Program.cs
++++ b/src/slskd/Program.cs
+@@ -5,6 +5,8 @@
+ //     █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█
+ //   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
+ //   │ Copyright (c) JP Dillingham.
++//   │ Copyright (c) 2026 Ramonator.
++//   │ Modified: changed the network client version identifier and the startup banner to identify this modified version.
+ //   │
+ //   │ This program is free software: you can redistribute it and/or modify
+ //   │ it under the terms of the GNU Affero General Public License as published
+@@ -180,8 +182,9 @@ namespace slskd
+         /// </summary>
+         /// <remarks>
+         ///     NOTICE: If you have forked slskd, change this number to something else.
++        ///     Modified version: 7613 instead of slskd's 760, so this build identifies itself as a different client.
+         /// </remarks>
+-        public static int NetworkMinorVersion { get; } = 760;
++        public static int NetworkMinorVersion { get; } = 7613;
+ 
+         /// <summary>
+         ///     Gets a value indicating whether the current version is a Canary build.
+@@ -1758,25 +1761,20 @@ namespace slskd
+ 
+                 var centeredVersion = new string(' ', paddingLeft) + version + new string(' ', paddingRight);
+ 
+-                var logos = new[]
+-                {
+-                    $@"
+-          ▄▄▄▄         ▄▄▄▄       ▄▄▄▄
+-  ▄▄▄▄▄▄▄ █  █ ▄▄▄▄▄▄▄ █  █▄▄▄ ▄▄▄█  █
+-  █__ --█ █  █ █__ --█ █    ◄█ █  -  █
+-  █▄▄▄▄▄█ █▄▄█ █▄▄▄▄▄█ █▄▄█▄▄█ █▄▄▄▄▄█",
+-                    @$"
+-        ▄▄▄▄     ▄▄▄▄     ▄▄▄▄
+-  ▄▄▄▄▄▄█  █▄▄▄▄▄█  █▄▄▄▄▄█  █
+-  █__ --█  █__ --█    ◄█  -  █
+-  █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█",
+-                };
+-
+-                var logo = logos[new System.Random().Next(0, logos.Length)];
++                // modified version: the original logo is replaced, as required by the Additional Terms
++                var logo = @"
++  ╔═══════════════════════════════════════════════╗
++  ║   soulseek-antibot  ·  MODIFIED VERSION       ║
++  ╚═══════════════════════════════════════════════╝";
+ 
+                 var banner = @$"
+ {logo}
+ ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
++│ ⚠️  This is a modified version of slskd.  It is not the original program,
++│ and it is not maintained by, endorsed by, or affiliated with the slskd
++│ project or its author(s).  Modification: per-file download cap and human
++│ verification of upload requests over private chat.
++│
+ │ This program is free software: you can redistribute it and/or modify
+ │ it under the terms of the GNU Affero General Public License as published
+ │ by the Free Software Foundation, version 3.
+@@ -1786,6 +1784,7 @@ namespace slskd
+ │ of the AGPLv3.  See the LICENSE file in the root directory of this
+ │ project for the complete terms and conditions.
+ │
++│ Based on slskd:
+ │ 🌐 https://slskd.org
+ │ 🐱 https://github.com/slskd/slskd
+ │

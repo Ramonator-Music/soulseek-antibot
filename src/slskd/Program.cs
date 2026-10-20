@@ -5,6 +5,8 @@
 //     █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█
 //   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
 //   │ Copyright (c) JP Dillingham.
+//   │ Copyright (c) 2026 Ramonator.
+//   │ Modified: changed the network client version identifier and the startup banner to identify this modified version.
 //   │
 //   │ This program is free software: you can redistribute it and/or modify
 //   │ it under the terms of the GNU Affero General Public License as published
@@ -180,8 +182,9 @@ namespace slskd
         /// </summary>
         /// <remarks>
         ///     NOTICE: If you have forked slskd, change this number to something else.
+        ///     Modified version: 7613 instead of slskd's 760, so this build identifies itself as a different client.
         /// </remarks>
-        public static int NetworkMinorVersion { get; } = 760;
+        public static int NetworkMinorVersion { get; } = 7613;
 
         /// <summary>
         ///     Gets a value indicating whether the current version is a Canary build.
@@ -1758,25 +1761,20 @@ namespace slskd
 
                 var centeredVersion = new string(' ', paddingLeft) + version + new string(' ', paddingRight);
 
-                var logos = new[]
-                {
-                    $@"
-          ▄▄▄▄         ▄▄▄▄       ▄▄▄▄
-  ▄▄▄▄▄▄▄ █  █ ▄▄▄▄▄▄▄ █  █▄▄▄ ▄▄▄█  █
-  █__ --█ █  █ █__ --█ █    ◄█ █  -  █
-  █▄▄▄▄▄█ █▄▄█ █▄▄▄▄▄█ █▄▄█▄▄█ █▄▄▄▄▄█",
-                    @$"
-        ▄▄▄▄     ▄▄▄▄     ▄▄▄▄
-  ▄▄▄▄▄▄█  █▄▄▄▄▄█  █▄▄▄▄▄█  █
-  █__ --█  █__ --█    ◄█  -  █
-  █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█",
-                };
-
-                var logo = logos[new System.Random().Next(0, logos.Length)];
+                // modified version: the original logo is replaced, as required by the Additional Terms
+                var logo = @"
+  ╔═══════════════════════════════════════════════╗
+  ║   soulseek-antibot  ·  MODIFIED VERSION       ║
+  ╚═══════════════════════════════════════════════╝";
 
                 var banner = @$"
 {logo}
 ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
+│ ⚠️  This is a modified version of slskd.  It is not the original program,
+│ and it is not maintained by, endorsed by, or affiliated with the slskd
+│ project or its author(s).  Modification: per-file download cap and human
+│ verification of upload requests over private chat.
+│
 │ This program is free software: you can redistribute it and/or modify
 │ it under the terms of the GNU Affero General Public License as published
 │ by the Free Software Foundation, version 3.
@@ -1786,6 +1784,7 @@ namespace slskd
 │ of the AGPLv3.  See the LICENSE file in the root directory of this
 │ project for the complete terms and conditions.
 │
+│ Based on slskd:
 │ 🌐 https://slskd.org
 │ 🐱 https://github.com/slskd/slskd
 │

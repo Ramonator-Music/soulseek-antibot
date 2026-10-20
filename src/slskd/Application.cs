@@ -5,6 +5,8 @@
 //     █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█
 //   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
 //   │ Copyright (c) JP Dillingham.
+//   │ Copyright (c) 2026 Ramonator.
+//   │ Modified: upload requests and private messages pass through the antibot gate (per-file download cap and human verification over private chat).
 //   │
 //   │ This program is free software: you can redistribute it and/or modify
 //   │ it under the terms of the GNU Affero General Public License as published
@@ -197,6 +199,8 @@ namespace slskd
 
             Client = soulseekClient;
 
+            Antibot = new global::slskd.Antibot.AntibotService(OptionsMonitor, soulseekClient, Transfers.Uploads);
+
             Client.DiagnosticGenerated += Client_DiagnosticGenerated;
 
             Client.TransferStateChanged += Client_TransferStateChanged;
@@ -239,6 +243,7 @@ namespace slskd
         private static bool ShuttingDown { get; set; } = false;
 
         private ISoulseekClient Client { get; set; }
+        private global::slskd.Antibot.AntibotService Antibot { get; }
         private FileService Files { get; }
         private IRoomService RoomService { get; set; }
         private IBrowseTracker BrowseTracker { get; set; }
@@ -705,6 +710,15 @@ namespace slskd
                     throw new DownloadEnqueueException("File not shared.");
                 }
 
+                // modified version: per-file download cap and human verification. checked before the group lookup so
+                // that privileged users are not exempt.
+                var antibotRejection = Antibot.CheckEnqueue(username, filename);
+
+                if (antibotRejection != null)
+                {
+                    throw new DownloadEnqueueException(antibotRejection);
+                }
+
                 // get the user's group. this will be the name of the user's group, if they have been added to a
                 // user defined group, or one of the built-ins; 'default', 'privileged', 'leecher', or 'blacklisted'
                 var group = await Users.GetOrFetchGroupAsync(username);
@@ -1125,6 +1139,13 @@ namespace slskd
             else
             {
                 // todo: raise blacklisted message event?
+            }
+
+            // modified version: a correct verification answer is consumed (and acknowledged) by the antibot gate
+            // instead of being added to the conversation
+            if (Antibot.TryHandlePrivateMessage(args.Username, args.Id, args.Message))
+            {
+                return;
             }
 
             Messaging.Conversations.HandleMessageAsync(args.Username, PrivateMessage.FromEventArgs(args));

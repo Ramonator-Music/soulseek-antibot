@@ -5,6 +5,8 @@
 //     █▄▄▄▄▄█▄▄█▄▄▄▄▄█▄▄█▄▄█▄▄▄▄▄█
 //   ┍━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━━━━ ━  ━┉   ┉     ┉
 //   │ Copyright (c) JP Dillingham.
+//   │ Copyright (c) 2026 Ramonator.
+//   │ Modified: added the 'antibot' options section (per-file download cap and human verification).
 //   │
 //   │ This program is free software: you can redistribute it and/or modify
 //   │ it under the terms of the GNU Affero General Public License as published
@@ -262,6 +264,12 @@ namespace slskd
         /// </summary>
         [Validate]
         public TransfersOptions Transfers { get; init; } = new TransfersOptions();
+
+        /// <summary>
+        ///     Gets options for the upload request gate of this modified version (per-file download cap and human verification).
+        /// </summary>
+        [Validate]
+        public global::slskd.Antibot.AntibotOptions Antibot { get; init; } = new global::slskd.Antibot.AntibotOptions();
 
         /// <summary>
         ///     Gets blacklist options.

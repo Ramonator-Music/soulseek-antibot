@@ -1,3 +1,7 @@
+> **soulseek-antibot** — "This is a modified version of slskd.  It is not maintained by, endorsed by, or affiliated with the slskd project or its author(s)."
+>
+> Modification (Copyright (c) 2026 Ramonator): incoming upload requests pass through a gate with a per-file download cap and a simple human verification over private chat (`antibot` options section). The original project lives at https://github.com/slskd/slskd. All original license notices below are preserved.
+
 # slskd
 
 [![Build](https://img.shields.io/github/actions/workflow/status/slskd/slskd/ci.yml?branch=master&logo=github)](https://github.com/slskd/slskd/actions/workflows/ci.yml)
