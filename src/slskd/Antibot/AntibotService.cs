@@ -59,6 +59,11 @@ namespace slskd.Antibot
     /// </remarks>
     public class AntibotService
     {
+        /// <summary>
+        ///     Longest answer (in letters and digits) accepted as a verification reply.
+        /// </summary>
+        private const int MaxAnswerLetters = 40;
+
         private static readonly string[] Words =
         [
             "mango", "tigre", "piano", "cometa", "lluvia", "volcan", "girasol", "ballena", "canela", "tambor",
@@ -84,6 +89,7 @@ namespace slskd.Antibot
             VerifiedFile = Path.Combine(Program.DataDirectory, "antibot_verified.json");
             Key = LoadOrCreateKey(Path.Combine(Program.DataDirectory, "antibot.key"));
             Verified = LoadVerified(VerifiedFile);
+            VerifiedFileTime = FileTime(VerifiedFile);
 
             Log.Information("Antibot gate loaded with {Count} verified user(s)", Verified.Count);
         }
@@ -96,6 +102,8 @@ namespace slskd.Antibot
         private byte[] Key { get; }
         private HashSet<string> Verified { get; }
         private object VerifiedLock { get; } = new object();
+        private DateTime VerifiedFileTime { get; set; }
+        private DateTime NextVerifiedCheck { get; set; }
         private ConcurrentDictionary<string, DateTime> LastChallenge { get; } = new ConcurrentDictionary<string, DateTime>();
 
         /// <summary>
@@ -155,13 +163,17 @@ namespace slskd.Antibot
 
             var word = WordFor(username);
 
-            if (!Tokenize(message).Contains(word))
+            if (!IsAnswer(message, word))
             {
                 return false;
             }
 
             lock (VerifiedLock)
             {
+                // pick up any manual edit first, so that saving doesn't overwrite it
+                NextVerifiedCheck = DateTime.MinValue;
+                ReloadVerifiedIfChanged();
+
                 Verified.Add(username);
                 SaveVerified();
             }
@@ -190,6 +202,14 @@ namespace slskd.Antibot
         private static bool IsExempt(string username, AntibotOptions options)
             => options.Exempt.Contains(username, StringComparer.Ordinal);
 
+        private static bool IsAnswer(string message, string word)
+        {
+            // letters and digits only, without accents or spaces: tolerates stray characters that some clients append
+            // (e.g. "nutriaÂ"), while the length cap keeps a bot from passing by sending the whole word list
+            var letters = string.Concat(Tokenize(message));
+            return letters.Length <= MaxAnswerLetters && letters.Contains(word, StringComparison.Ordinal);
+        }
+
         private static IEnumerable<string> Tokenize(string text)
         {
             var normalized = (text ?? string.Empty).Normalize(NormalizationForm.FormD);
@@ -212,7 +232,7 @@ namespace slskd.Antibot
 
         private static string Render(string template, string word, string sourceUrl)
             => (template ?? string.Empty)
-                .Replace("{word}", word, StringComparison.Ordinal)
+                .Replace("{word}", word.ToUpperInvariant(), StringComparison.Ordinal)
                 .Replace("{source}", string.IsNullOrWhiteSpace(sourceUrl) ? "-" : sourceUrl, StringComparison.Ordinal);
 
         private static byte[] LoadOrCreateKey(string file)
@@ -238,11 +258,51 @@ namespace slskd.Antibot
             return new HashSet<string>(users, StringComparer.Ordinal);
         }
 
+        private static DateTime FileTime(string file)
+            => System.IO.File.Exists(file) ? System.IO.File.GetLastWriteTimeUtc(file) : DateTime.MinValue;
+
         private bool IsVerified(string username)
         {
             lock (VerifiedLock)
             {
+                ReloadVerifiedIfChanged();
                 return Verified.Contains(username);
+            }
+        }
+
+        private void ReloadVerifiedIfChanged()
+        {
+            // caller holds VerifiedLock. lets the file be edited by hand (manual verification) without a restart.
+            // checked at most every few seconds, because this runs on every upload request
+            var now = DateTime.UtcNow;
+
+            if (now < NextVerifiedCheck)
+            {
+                return;
+            }
+
+            NextVerifiedCheck = now.AddSeconds(5);
+
+            var time = FileTime(VerifiedFile);
+
+            if (time == VerifiedFileTime)
+            {
+                return;
+            }
+
+            // remembered even if loading fails, so that a broken file is reported once and not every few seconds
+            VerifiedFileTime = time;
+
+            try
+            {
+                var users = LoadVerified(VerifiedFile);
+                Verified.Clear();
+                Verified.UnionWith(users);
+                Log.Information("Antibot: verified list reloaded from disk ({Count} user(s))", Verified.Count);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning("Antibot: could not reload {File}, keeping the current list: {Message}", VerifiedFile, ex.Message);
             }
         }
 
@@ -253,6 +313,7 @@ namespace slskd.Antibot
             var json = JsonSerializer.Serialize(Verified.OrderBy(u => u, StringComparer.Ordinal).ToArray(), new JsonSerializerOptions { WriteIndented = true });
             System.IO.File.WriteAllText(temp, json);
             System.IO.File.Move(temp, VerifiedFile, overwrite: true);
+            VerifiedFileTime = FileTime(VerifiedFile);
         }
 
         private async Task SendLinesAsync(string username, string text)
@@ -360,8 +421,9 @@ namespace slskd.Antibot
             ///     Gets the challenge message. {word} is replaced with the user's word and {source} with the source URL.
             /// </summary>
             public string ChallengeMessage { get; init; } =
-                "Hola 👋 Comparto solo con personas, no con bots. Para descargar, escribe aquí la palabra «{word}» (una sola vez).\n" +
-                "Hi 👋 I only share with humans, not bots. To download, type the word «{word}» here (just once).\n" +
+                "Hola 👋 Comparto solo con personas, no con bots. Para descargar, respóndeme aquí solo con esta palabra, sin nada más: {word}\n" +
+                "Hi 👋 I only share with humans, not bots. To download, reply here with just this word, nothing else: {word}\n" +
+                "Solo hace falta una vez. / You only need to do this once.\n" +
                 "Código de este cliente modificado / Source of this modified client: {source}";
 
             /// <summary>
