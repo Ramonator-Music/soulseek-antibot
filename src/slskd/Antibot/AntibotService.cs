@@ -105,6 +105,8 @@ namespace slskd.Antibot
         private DateTime VerifiedFileTime { get; set; }
         private DateTime NextVerifiedCheck { get; set; }
         private ConcurrentDictionary<string, DateTime> LastChallenge { get; } = new ConcurrentDictionary<string, DateTime>();
+        private Queue<DateTime> RecentChallenges { get; } = new Queue<DateTime>();
+        private object RecentChallengesLock { get; } = new object();
 
         /// <summary>
         ///     Decides whether an incoming upload request should be rejected.
@@ -332,6 +334,25 @@ namespace slskd.Antibot
             return Words[index];
         }
 
+        private bool TryAcquireChallengeSlot(DateTime now, int maxPerMinute)
+        {
+            lock (RecentChallengesLock)
+            {
+                while (RecentChallenges.Count > 0 && now - RecentChallenges.Peek() >= TimeSpan.FromMinutes(1))
+                {
+                    RecentChallenges.Dequeue();
+                }
+
+                if (RecentChallenges.Count >= maxPerMinute)
+                {
+                    return false;
+                }
+
+                RecentChallenges.Enqueue(now);
+                return true;
+            }
+        }
+
         private void SendChallenge(string username, AntibotOptions.VerificationOptions options)
         {
             var now = DateTime.UtcNow;
@@ -339,6 +360,13 @@ namespace slskd.Antibot
 
             if (LastChallenge.TryGetValue(username, out var last) && now - last < cooldown)
             {
+                return;
+            }
+
+            if (!TryAcquireChallengeSlot(now, options.MaxChallengesPerMinute))
+            {
+                // not recorded in LastChallenge, so the user gets the message on a later attempt
+                Log.Information("Antibot: challenge rate limit reached ({Max}/min), no message sent to {Username}", options.MaxChallengesPerMinute, username);
                 return;
             }
 
@@ -411,6 +439,13 @@ namespace slskd.Antibot
             /// </summary>
             [Range(1, 1440)]
             public int CooldownMinutes { get; init; } = 10;
+
+            /// <summary>
+            ///     Gets the maximum number of challenges sent per minute across all users. Each line of the message is a
+            ///     private message of its own, and the server bans the account for 30 minutes when too many go out at once.
+            /// </summary>
+            [Range(1, 60)]
+            public int MaxChallengesPerMinute { get; init; } = 3;
 
             /// <summary>
             ///     Gets the URL of the source code of this modified version (AGPLv3 section 13). Rendered as {source}.

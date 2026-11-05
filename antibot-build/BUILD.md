@@ -23,12 +23,15 @@ antibot:
   verification:
     enabled: true
     cooldown_minutes: 10    # min. minutes between challenge messages to the same user
+    max_challenges_per_minute: 3  # across all users; see below
     source_url: <url of this repository>
     # challenge_message / success_message: optional overrides; {word} (shown in capitals) and {source} are replaced
     # each line of a message is sent as a separate private message: the server drops messages with line breaks
 ```
 
 Verified users are stored in `<app dir>/data/antibot_verified.json`; the HMAC key that derives each user's word in `<app dir>/data/antibot.key`.
+
+The server bans the account for 30 minutes when too many private messages go out at once, and each line of a message counts as one. Above `max_challenges_per_minute` the request is still rejected, but no message goes out; the user gets it on a later attempt.
 
 A reply counts as correct if, reduced to letters and digits (no accents, no spaces, case-insensitive), it contains the user's word and is at most 40 characters long. This tolerates stray characters some clients append, and keeps a bot from passing by replying with the whole word list.
 
